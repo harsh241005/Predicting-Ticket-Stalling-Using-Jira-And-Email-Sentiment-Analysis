@@ -4,6 +4,7 @@ A controlled empirical study on whether developer **communication patterns alone
  
 > **TL;DR** — On 916 Apache Hadoop tickets across 7 years, a 7-feature communication-only model (Model A) matches a 19-feature model (Model B) that adds structural metadata. The recall difference is 0.010, well within cross-validation fold variance. Communication signals carry most of the predictive information.
  
+website link:-https://ticket-stall-predictor.streamlit.app/
 
 ![dashboard img](https://github.com/user-attachments/assets/077ed60b-567b-455f-8b7b-31c248cd0e45)
 ---
