@@ -34,3 +34,7 @@ Thumbs.db
 # Word lock files
 ~$*.docx
 ~$*.doc
+
+# Deployment data for Streamlit Cloud
+!data/processed/isa3_ticket_level.csv
+!data/processed/isa3_enriched_dataset.csv
