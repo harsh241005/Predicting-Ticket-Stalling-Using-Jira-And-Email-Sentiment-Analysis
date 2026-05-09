@@ -1,270 +1,260 @@
-# Socio-Technical Health Monitor
+# Predicting Ticket Stalling Using JIRA and Email Sentiment Analysis
+ 
+A controlled empirical study on whether developer **communication patterns alone** can predict stalled software tickets — without relying on structural project metadata.
+ 
+> **TL;DR** — On 916 Apache Hadoop tickets across 7 years, a 7-feature communication-only model (Model A) matches a 19-feature model (Model B) that adds structural metadata. The recall difference is 0.010, well within cross-validation fold variance. Communication signals carry most of the predictive information.
+ 
 
-> Predicting software task stalling risk from the emotional and communicative footprint of developer teams — using JIRA issue data and Apache mailing list archives.
-
-**MScIDS Semester VI Capstone Project**
-Goa Business School, Goa University · Guide: Dr. Swapnil Fadte
-
+![dashboard img](https://github.com/user-attachments/assets/077ed60b-567b-455f-8b7b-31c248cd0e45)
 ---
-
-## Team
-
-| Name | Roll No. |
-|---|---|
-| Rudresh Achari | 2330 |
-| Unnat Umarye | 2303 |
-| Sarvadhnya Patil | 2321 |
-| Samuel Bhandari | 2308 |
-| Harsh Palyekar | 2329 |
-
+ 
+## Project Context
+ 
+Master of Science (Integrated) in Data Science — final-year project.
+**Goa Business School, Goa University**, 2025–2026.
+Supervised by **Dr. Swapnil Fadte**, Department of Computer Science and Technology.
+ 
+**Team:** Rudresh Achari (2330) · Unnat Umarye (2303) · Sarvadhnya Patil (2321) · Samuel Bhandari (2308) · Harsh Palyekar (2329)
+ 
 ---
-
-## Overview
-
-This project builds a machine learning system that monitors the socio-technical health of software development teams by analysing developer communication patterns in JIRA issue tracker data and Apache mailing list archives. The core hypothesis is that **the emotional tone, variance, and volume of developer communication alone are sufficient to predict project stalling** — without relying on structural metadata.
-
-The system produces two actionable outputs:
-
-1. **Task Stalling Risk** — classifies whether an open ticket is likely to remain stalled, using only pure socio-technical signals derived from email sentiment and communication volume.
-2. **SHAP-Based Explainability** — an interactive dashboard that shows *why* the model raised or lowered a stall alert for any given ticket, enabling project managers to take targeted action.
-
+ 
+## The Question
+ 
+Software development is socio-technical: how a team *talks* about a ticket carries information that structured fields (priority, type, project) miss. Prior work has shown both communication sentiment and structural lifecycle features can predict ticket outcomes, but the two have rarely been compared **head-to-head under controlled conditions**.
+ 
+**Hypothesis:** A model trained only on communication-derived features (Model A) achieves comparable predictive performance to a model that adds structural project metadata (Model B).
+ 
+If true, communication-only monitoring becomes a viable approach for projects where rich structural metadata isn't available.
+ 
 ---
-
+ 
 ## Dataset
-
-| Property | Value |
+ 
+| Source | Detail |
 |---|---|
-| Source | Apache Software Foundation — JIRA Archive + Developer Mailing Lists |
-| Projects Covered | Hadoop (Common), HDFS, YARN, MapReduce |
-| Time Period | January 2023 – December 2024 |
-| Raw Emails Processed | 7,051 |
-| Bot Emails Removed | 6,039 (85% of corpus — sender-domain verified) |
-| Human-Verified Records | 1,012 |
-| Stalled Tickets | 190 |
-| Active Tickets | 822 |
-| Class Ratio | 4.3 : 1 (Active : Stalled) |
-
-### Why Sender Verification Matters
-
-In ISA II, a regex subject-line filter was used to remove automated bot emails (Jenkins, JIRA notifications). Subsequent audits revealed two critical failures: the regex was **deleting human developer emails** that discussed Jenkins, and **missing bots** that used MIME-encoded subject lines (e.g., `=?utf-8?Q?[jira]_[Commented]_..?=`). The ISA III pipeline fixes this by dropping any email sent from `jira@`, `jenkins@`, or `qa@` sender domains — a mathematically verifiable ground-truth filter that reduced the working corpus from ~6,950 contaminated rows to **1,012 confirmed human communications**.
-
+| **Subprojects** | HADOOP, HDFS, YARN, MAPREDUCE |
+| **Window** | 2018–2024 |
+| **Tickets (raw)** | Apache JIRA REST API |
+| **Emails** | 4 dev mailing lists × 7 years × 12 months = 336 mbox files |
+| **Final dataset** | **916 unique tickets** (after the funnel below) |
+ 
+**Pipeline funnel:**
+ 
+| Stage | Records |
+|---|---|
+| Raw email–ticket links | 112,162 |
+| After deduplication | 46,553 |
+| After date filtering | 46,486 |
+| After bot filtering | 5,950 |
+| **Unique tickets (modelling input)** | **916** |
+ 
+Class distribution: 117 stalled (12.8%), 799 active/resolved (87.2%) — a ~7.1:1 imbalance handled via stratified CV and class weighting (no SMOTE).
+ 
+<p align="center">
+  <img src="charts/B5_tickets_by_year.png" alt="Tickets by year" width="600"/>
+</p>
 ---
-
+ 
 ## Methodology
-
-### Pipeline Architecture (Sequential, MLOps Standard)
-
-The repository is structured as a numbered sequential pipeline. Each script name encodes its position in the data flow:
-
+ 
+### Pipeline (7 stages)
+ 
 ```
-01_data_acquisition.py    →  Download mbox archives from Apache Lists API
-02_entity_linking.py      →  Parse emails, link to JIRA tickets, score sentiment
-03_dataset_merger.py      →  Merge parsed chunks, deduplicate on UTC timestamps
-04_feature_engineering.py →  Bot filter, MIME decoding, feature engineering, target definition
-05_model_evaluation.py    →  5-fold stratified cross-validation across three architectures
-06_shap_analysis.py       →  Final model training, PR curve, SHAP summary, .pkl export
-07_eda_visualizations.py  →  EDA charts for report and presentation
+  Script 01 ──▶  Script 02 ──▶  Script 03 ──▶  Script 04 ──▶  Scripts 05/05b ──▶  Script 06
+  Acquire        Link + Score   Merge          Engineer         Train + Eval        SHAP
+  raw data       sentiment      datasets       features         Model A vs B        analysis
 ```
-
-### Sentiment Extraction
-
-Email text is processed using **VADER (Valence Aware Dictionary and sEntiment Reasoner)**, selected for its suitability with short-form professional communication. Each email produces a compound score in the range \[-1.0, +1.0\].
-
-VADER is extended with a **44-term custom IT-domain lexicon** (authored by Unnat Umarye) that recalibrates technical vocabulary. For example, `kill`, `dead`, and `abort` are set to neutral (0), as they are routine programming commands — not hostile language. `fixed` and `resolved` are set positive; `crash`, `vulnerability`, and `outage` are set appropriately negative.
-
-### The 7 "Honest" Socio-Technical Features
-
-These features were deliberately chosen to contain **zero target leakage**. Features like `is_assigned`, `has_votes`, and `watches.watchcount` were identified as structural proxies — properties that stalled tickets already possess by definition — and excluded from the final model.
-
-| Feature | Correlation to Stalling | Directional Meaning |
-|---|---|---|
-| `avg_sentiment` | +0.1865 | High positivity often masks a lack of urgency |
-| `email_count_per_ticket` | −0.1771 | Active communication volume prevents stalling |
-| `sentiment_variance` | −0.1636 | Emotional fluctuation signals active problem-solving; flat variance = dead ticket |
-| `sentiment_trend` | +0.1070 | Tickets that grow happier over time stall more often — declining push to close |
-| `priority_numeric` | +0.1026 | Higher-priority tickets stall slightly more (complexity effect) |
-| `subject_length` | +0.0917 | Over-explaining vs. acting |
-| `has_enough_emails` | −0.0365 | Multiple emails slightly reduces stall risk |
-
-### Model Selection
-
-Three architectures were evaluated using 5-fold stratified cross-validation on the 1,012 human-verified records:
-
-| Algorithm | Mean Recall (Stalled) | Mean Precision | ROC-AUC |
+ 
+1. **Data acquisition** (`01_data_acquisition.py`) — JIRA REST API + Apache mbox archives.
+2. **Entity linking + sentiment** (`02_entity_linking.py`) — regex-link emails to tickets via `\b(HADOOP|HDFS|YARN|MAPREDUCE)-\d+\b`; bot-filter; clean text; score with VADER.
+3. **Dataset merging** (`03_dataset_merger.py`) — join email-level data with JIRA metadata, deduplicate.
+4. **Feature engineering + ticket-level aggregation** (`04_feature_engineering.py`) — compute features, aggregate to one row per ticket *before* any train/test split (prevents leakage).
+5. **Model evaluation** (`05_model_evaluation.py`, `05b_model_evaluation_structural.py`) — stratified 5-fold CV across 3 classifiers.
+6. **SHAP analysis** (`06_shap_analysis.py`) — feature attribution.
+7. **EDA visualisations** (`07_eda_visualizations.py`) — distributions, correlations, class balance.
+### Why VADER (not BERT/RoBERTa)
+ 
+Three reasons: (1) **computational tractability** — scores tens of thousands of emails in seconds, no GPU; (2) **transparency** — rule-based, fully inspectable; (3) **established practice** — the dominant tool in MSR sentiment research, enabling direct comparability. Limitations on technical text are well-documented and acknowledged. Transformer-based scoring is identified as future work.
+ 
+A custom `strip_quoted_text()` function removes quoted replies, signatures, code blocks, stack traces, and log lines before scoring — these systematically contaminate VADER's lexicon-based scores.
+ 
+### Target variable
+ 
+A ticket is **stalled** if it has no recorded resolution date AND its current status is not in `{Patch Available, In Progress, Reopened}`. The blocklist of active-work statuses prevents healthy tickets from being mislabelled.
+ 
+### Two feature sets
+ 
+**Model A — Communication only (7 features):**
+`email_count_per_ticket`, `subject_length`, `avg_sentiment`, `sentiment_variance`, `sentiment_trend`, `unique_senders`, `priority_numeric`
+ 
+**Model B — Communication + Structural (19 features):**
+All of Model A, plus `description_length`, 4 project one-hots (`proj_HADOOP`, `proj_HDFS`, `proj_YARN`, `proj_MAPREDUCE`), and 7 issue-type one-hots (`type_Bug`, `type_Task`, `type_Sub-task`, `type_Improvement`, `type_New Feature`, `type_Test`, `type_Wish`).
+ 
+Every structural feature is observable at ticket creation — no leakage from progress-dependent fields like assignment, votes, or watchers.
+ 
+### Evaluation
+ 
+- **Stratified 5-fold CV** with `random_state=42` (identical fold assignments for both models).
+- **Three classifiers:** Logistic Regression, Random Forest, XGBoost — all default hyperparameters (intentional — tuning would confound the A vs B comparison).
+- **Metrics:** ROC-AUC (primary), recall on stalled class, precision, F1.
+- **Class imbalance:** `class_weight='balanced'` for LR/RF, `scale_pos_weight` for XGBoost. No synthetic oversampling.
+---
+ 
+## Results
+ 
+<p align="center">
+  <img src="charts/D1_correlation_heatmap.png" alt="Feature correlation heatmap" width="650"/>
+</p>
+*No single feature dominates — max |r| ≈ 0.11. Predictive performance must come from joint feature behaviour, not one strong signal.*
+ 
+### Model A — Communication only (7 features)
+ 
+| Classifier | Recall (Stalled) | Precision | ROC-AUC |
 |---|---|---|---|
-| Logistic Regression (Baseline) | 0.632 (± 0.153) | 0.330 | 0.717 |
-| Random Forest (Ensemble) | 0.947 (± 0.074) | 0.733 | 0.982 |
-| **XGBoost (Tuned — Final)** | **0.926 (± 0.091)** | **0.710** | **0.980** |
-
-**XGBoost was selected as the final model** for the production dashboard due to its stable, well-calibrated probability distributions — critical for the SHAP force plot rendering in the Streamlit app. Random Forest achieved marginally higher cross-validation recall (0.947 vs 0.926), which is consistent with ensemble methods handling the fuzziness of human sentiment data slightly better than gradient-boosted error correction. Both results validate the socio-technical hypothesis.
-
-### Final Model Performance (Unseen Test Set, Threshold = 0.50)
-
-| Class | Precision | Recall | F1-Score | Support |
-|---|---|---|---|---|
-| Active (0) | 0.97 | 0.95 | 0.96 | 165 |
-| **Stalled (1)** | **0.79** | **0.89** | **0.84** | 38 |
-| Accuracy | — | — | 0.94 | 203 |
-| Macro Avg | 0.88 | 0.92 | 0.90 | 203 |
-
-**PR-AUC: 0.93** — confirms model stability across decision thresholds.
-
-The 0.79 precision on the stalled class is a deliberate trade-off. In an early warning radar context, a recall of 89% (catching 9 of 10 failing tasks) is more operationally valuable than high precision. The 21% of false alarms still represent tickets with poor communication patterns — flagging them prompts manager review that is likely to be productive regardless.
-
+| **Logistic Regression** | **0.548 ± 0.211** | 0.145 | 0.564 |
+| Random Forest | 0.112 ± 0.162 | 0.156 | 0.599 |
+| XGBoost | 0.214 ± 0.176 | 0.185 | 0.568 |
+ 
+### Model A vs Model B — Logistic Regression (deployed config)
+ 
+| Metric | Model A | Model B | Δ |
+|---|---|---|---|
+| Recall (Stalled) | 0.548 | 0.558 | **+0.010** |
+| ROC-AUC | 0.564 | 0.632 | +0.068 |
+ 
+The recall delta of 0.010 is two orders of magnitude smaller than fold variance (~0.21). The ROC-AUC delta of 0.068 is modest in absolute terms and required a **271% increase in feature dimensionality**.
+ 
+**The hypothesis is supported.** Communication features carry most of the predictive signal; structural metadata adds little.
+ 
+<p align="center">
+  <img src="charts/confusion_matrix_model_a.png" alt="Model A confusion matrix" width="42%"/>
+  &nbsp;&nbsp;
+  <img src="charts/confusion_matrix_model_b.png" alt="Model B confusion matrix" width="42%"/>
+</p>
+*Left: Model A (7 communication features). Right: Model B (19 features). Visually near-identical confusion patterns.*
+ 
+### Why Logistic Regression beat the ensembles
+ 
+On 916 tickets with mostly low individual feature correlations (max |r| ≈ 0.11), the linear additive structure of Logistic Regression generalised better than RF/XGBoost, which over-fit noise patterns at this sample size. Detailed in Chapter 5.7 of the report.
+ 
 ---
-
-## Key Findings
-
-- Developer sentiment remained broadly positive (mean ≈ 0.28) across the 24-month observation window.
-- Sentiment dropped to **0.10** during the Hadoop 3.4.1 release candidate crunch (November 2024), recovering to **0.42** post-release — confirming the pipeline's ability to detect real engineering events in the data.
-- Critical tickets carry the **lowest median sentiment (0.23)**; Blocker tickets show an elevated score (0.38), attributed to relief following rapid resolution.
-- Stalled tasks exhibit a **bimodal sentiment distribution** — a high upper quartile (frustration release) combined with an extended negative tail (sustained stress).
-- `sentiment_variance` is the **top SHAP predictor**: low variance (flat emotional signal) strongly pushes toward a stall prediction, confirming that communication silence is the clearest early warning of task abandonment.
-- Communication-derived features account for the majority of total model feature importance, confirming that the NLP pipeline contributes substantially more predictive signal than structured JIRA metadata alone.
-
----
-
-## Project Structure
-
-```
-Socio-Technical-Health-Monitor/
-│
-├── data/
-│   ├── raw/                          # Original .mbox files and issues.csv
-│   ├── interim/                      # Parsed chunks and master_project_dataset.csv
-│   └── processed/                    # isa3_enriched_dataset.csv (model-ready)
-│
-├── scripts/
-│   ├── 01_data_acquisition.py        # Download mbox archives
-│   ├── 02_entity_linking.py          # Parse emails, VADER scoring, JIRA linking
-│   ├── 03_dataset_merger.py          # Merge + UTC-dedup across chunks
-│   ├── 04_feature_engineering.py     # Bot filter, MIME decode, feature engineering
-│   ├── 05_model_evaluation.py        # 5-fold CV across LR, RF, XGBoost
-│   ├── 06_shap_analysis.py           # Final model, SHAP plots, .pkl export
-│   ├── 07_eda_visualizations.py      # EDA charts
-│   └── archive_and_audits/           # ISA II scripts and diagnostic files
-│
-├── models/
-│   ├── isa3_xgboost_honest.pkl       # Final trained XGBoost model
-│   └── isa3_shap_explainer_honest.pkl
-│
-├── visuals/
-│   ├── eda_plots/                    # EDA charts (output of 07_eda_visualizations.py)
-│   │   ├── 1_sentiment_by_priority.png
-│   │   ├── 2_stalled_vs_active.png
-│   │   ├── 3_correlation_heatmap.png
-│   │   ├── 5_monthly_sentiment_trend.png
-│   │   ├── 6_email_volume_distribution.png
-│   │   └── 7_task_status_by_priority.png
-│   ├── isa3_honest_shap_summary.png  # Output of 06_shap_analysis.py
-│   └── isa3_honest_pr_curve.png      # Output of 06_shap_analysis.py
-│
-├── tests/
-│   └── test_parse.py                 # Unit tests for email extraction logic
-│
-├── reports/                          # ISA II and ISA III academic reports
-├── app.py                            # Streamlit dashboard
-├── requirements.txt
-└── README.md
-```
-
----
-
-## Setup and Installation
-
+ 
+## The Dashboard
+ 
+A **Streamlit** app (`app.py`) operationalises Model A — deliberately the simpler model, consistent with the hypothesis result.
+ 
+Features:
+- Ticket selector across all 916 tickets
+- Stall probability with risk-zone tagline
+- Plain-language insights (e.g., *"Only 2 team members engaged — typical tickets have 5. Low engagement is the strongest stalling signal."*)
+- Communication signals table with percentile-ranked status labels
+- Per-email sentiment timeline (Plotly, colour-coded)
+- Reveal-actual-outcome button for demo verification
+Glassmorphism aesthetic, JetBrains Mono throughout, cyan/amber accent palette.
+ 
+![dashboard insights](https://github.com/user-attachments/assets/152a73e9-b50f-4034-8269-54ff8fd5e69c)
+Run it:
 ```bash
-# Clone the repository
-git clone https://github.com/rudresh33/Socio-Technical-Health-Monitor.git
-cd Socio-Technical-Health-Monitor
-
-# Create a virtual environment
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Requirements
-
-```
-pandas
-numpy
-scikit-learn
-xgboost
-shap
-vaderSentiment
-streamlit
-joblib
-matplotlib
-seaborn
-jupyter
-```
-
----
-
-## Running the Pipeline
-
-Run these scripts in order from the repository root. Each step produces the input for the next.
-
-```bash
-# Step 1 — Download mailing list archives (requires internet access)
-python scripts/01_data_acquisition.py
-
-# Step 2 — Parse emails, link to JIRA tickets, extract sender and body
-python scripts/02_entity_linking.py
-
-# Step 3 — Merge parsed chunks, deduplicate on UTC timestamps
-python scripts/03_dataset_merger.py
-
-# Step 4 — Apply bot filter, MIME decoding, engineer all features
-python scripts/04_feature_engineering.py
-
-# Step 5 — Cross-validate three model architectures, print metrics
-python scripts/05_model_evaluation.py
-
-# Step 6 — Train final XGBoost, generate SHAP plots, export .pkl files
-python scripts/06_shap_analysis.py
-
-# Step 7 — Generate all EDA visualisations (saved to visuals/eda_plots/)
-python scripts/07_eda_visualizations.py
-
-# Launch the interactive Streamlit dashboard
 streamlit run app.py
 ```
-
+ 
 ---
-
-## Running Tests
-
-The `tests/` directory contains a unit-testing framework that validates the email extraction logic against mock data — without requiring any real mbox files.
-
-```bash
-python tests/test_parse.py
+ 
+## Repository Structure
+ 
 ```
-
-This will: generate a synthetic JIRA CSV and a 3-email mock mbox file (containing one human email, one Jenkins bot, and one JIRA bot), run the parser, merge against mock JIRA data, and print the extracted sender, subject, body snippet, and sentiment score for each matched ticket. Successful output confirms the bot filter and sentiment pipeline are working correctly.
-
+.
+├── app.py                          # Streamlit dashboard (deploys Model A)
+├── scripts/
+│   ├── 01_data_acquisition.py      # JIRA + mbox download
+│   ├── 02_entity_linking.py        # Parse, bot-filter, clean, score, link
+│   ├── 03_dataset_merger.py        # Join emails ↔ JIRA metadata
+│   ├── 04_feature_engineering.py   # Features + ticket-level aggregation
+│   ├── 05_model_evaluation.py      # Model A — 7 communication features
+│   ├── 05b_model_evaluation_structural.py  # Model B — 19 features
+│   ├── 05c_confusion_matrices.py   # Confusion matrix figures
+│   ├── 06_shap_analysis.py         # SHAP attributions
+│   ├── 07_eda_visualizations.py    # EDA figures
+│   └── archive_and_audits/         # Earlier iterations + audit scripts
+├── models/                         # Serialised .pkl models + feature lists
+├── charts/                         # Result figures (confusion matrices, EDA)
+├── visuals/                        # SHAP plots, force plots, dashboard exports
+├── tests/                          # Unit tests
+└── data/                           # Empty in repo — see Data Access below
+    ├── raw/.gitkeep
+    ├── interim/.gitkeep
+    └── processed/.gitkeep
+```
+ 
 ---
-
-## ISA Milestone History
-
-| Milestone | Key Deliverable | Status |
-|---|---|---|
-| ISA I | Problem definition, project proposal, dataset identification | Complete |
-| ISA II | EDA, Random Forest baseline, initial feature engineering | Complete |
-| ISA III | Bot filter overhaul, target leakage removal, XGBoost + SHAP, Streamlit dashboard | Complete |
-
+ 
+## Reproducing the Pipeline
+ 
+### Requirements
+ 
+- **Python** 3.10+
+- **RAM:** 16 GB workstation (no GPU needed)
+- Standard scientific stack: `pandas`, `numpy`, `scikit-learn`, `xgboost`, `shap`, `vaderSentiment`, `mailbox`, `requests`, `joblib`, `streamlit`, `plotly`
+```bash
+pip install -r requirements.txt   # if you've added one — otherwise install above manually
+```
+ 
+### Run end-to-end
+ 
+```bash
+python scripts/01_data_acquisition.py        # ~hours — downloads JIRA + mbox archives
+python scripts/02_entity_linking.py          # ~minutes — links emails to tickets, scores VADER
+python scripts/03_dataset_merger.py          # seconds — joins datasets
+python scripts/04_feature_engineering.py     # seconds — features + aggregation
+python scripts/05_model_evaluation.py        # seconds — Model A
+python scripts/05b_model_evaluation_structural.py  # seconds — Model B
+python scripts/06_shap_analysis.py           # seconds — SHAP
+python scripts/07_eda_visualizations.py      # seconds — EDA charts
+streamlit run app.py                         # launch dashboard
+```
+ 
+All random seeds are fixed (`random_state=42`). Re-running produces identical metrics and dashboard outputs.
+ 
+### Data Access
+ 
+Raw data (~3.2 GB) is **not committed** to this repository. To regenerate:
+ 
+- **JIRA tickets:** Apache JIRA REST API (`https://issues.apache.org/jira/rest/api/2/search`) — Script 01 handles pagination and rate limiting.
+- **Mailing list mbox:** Apache archives at `https://lists.apache.org/list.html?<list>@hadoop.apache.org` for `common-dev`, `hdfs-dev`, `yarn-dev`, `mapreduce-dev`.
+The pipeline writes to `data/raw/`, `data/interim/`, and `data/processed/` — all git-ignored.
+ 
 ---
-
-## Academic Context
-
-This repository is the codebase for a Semester VI MScIDS capstone project submitted under the Internal Semester Assessment (ISA) framework at Goa Business School, Goa University. The project is evaluated across three ISA milestones covering problem definition, data analysis and modelling, and final delivery.
-
-All data sourced from the Apache Software Foundation public archives. No private or proprietary data was used.
-
+ 
+## Limitations and Honest Caveats
+ 
+The study reports modest absolute performance (ROC-AUC ≈ 0.56–0.63) and we treat this honestly rather than overselling. Specifically:
+ 
+- **Single ecosystem.** Apache Hadoop has distinctive cultural and technical norms; results may not generalise to closed-source teams or other open-source ecosystems.
+- **VADER on technical text.** Off-the-shelf lexicon scoring on developer email is documented as imperfect. Custom preprocessing mitigates but does not eliminate this.
+- **Sample size.** 916 tickets after honest aggregation is modest — sufficient for the comparative experiment but limits the ceiling for non-linear models.
+- **Conservative entity linking.** High-precision regex matching means tickets discussed without an explicit `PROJECT-NNNN` reference are not captured.
+- **No hyperparameter tuning.** Intentional, to keep the A vs B comparison clean — but means absolute performance is a lower bound on what's achievable.
+Full discussion of threats to validity in Chapter 6 of the project report.
+ 
 ---
-
-## License
-
-Submitted for academic assessment. All rights reserved by the authors. Please contact the team before reusing any part of this work.
+ 
+## Future Work
+ 
+- Replace VADER with a transformer fine-tuned on developer text (e.g., RoBERTa with SE-domain adaptation).
+- Extend beyond Hadoop to additional Apache subprojects and other open-source ecosystems.
+- Add interaction features and engineered combinations of the 7 communication signals.
+- Temporal modelling of sentiment trajectories rather than aggregated summaries.
+- Industrial validation with closed-source ticket + chat data (Slack, Teams) where available.
+---
+ 
+## Acknowledgements
+ 
+We thank Dr. Swapnil Fadte for supervision, the Apache Software Foundation for maintaining the public archives that make this kind of research possible, and the foundational MSR work of Marco Ortu, Alessandro Murgia, Parastou Tourani, and Bram Adams that inspired this study.
+ 
+---
+ 
+## Citation
+ 
+If you reference this work:
+ 
+> Achari, R., Umarye, U., Patil, S., Bhandari, S., & Palyekar, H. (2026). *Predicting Ticket Stalling Using JIRA and Email Sentiment Analysis* [M.Sc. (Integrated) project report]. Goa Business School, Goa University.
